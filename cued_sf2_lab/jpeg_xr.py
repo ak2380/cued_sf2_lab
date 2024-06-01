@@ -9,6 +9,8 @@ from .laplacian_pyramid import quant1, quant2
 from .dct import dct_ii, colxfm, regroup, unregroup
 from .bitword import bitword
 
+from scipy.ndimage import gaussian_filter
+
 __all__ = [
     "diagscan",
     "runampl",
@@ -486,20 +488,43 @@ def dwtgroup(X: np.ndarray, n: int) -> np.ndarray:
 
     return Y
 
+def calculate_local_variance(image, filter_size=11):
+    # Apply Gaussian filter to get the local mean
+    local_mean = gaussian_filter(image, filter_size)
+    # Apply Gaussian filter to get the local squared mean
+    local_squared_mean = gaussian_filter(image ** 2, filter_size)
+    # Calculate local variance
+    local_variance = local_squared_mean - local_mean ** 2
+    return local_mean, local_variance
 
-step_size_matrix = np.array([
-        [16, 11, 10, 16],
-        [12, 12, 14, 19],
-        [14, 13, 16, 35],
-        [14, 17, 38, 42]
-    ])
+def process_tiles(image, tile_size=64, filter_size=11):
+    height, width = image.shape
+    variance_map = np.zeros((height // tile_size, width // tile_size))
 
-step_size_matrix = step_size_matrix / 10
+    for i in range(0, height, tile_size):
+        for j in range(0, width, tile_size):
+            tile = image[i:i + tile_size, j:j + tile_size]
+            _, local_variance = calculate_local_variance(tile, filter_size)
+
+            mean_variance = np.mean(local_variance)
+            variance_map[i // tile_size, j // tile_size] = mean_variance
+
+    return variance_map
+
+
+# step_size_matrix = np.array([
+#         [16, 11, 10, 16],
+#         [12, 12, 14, 19],
+#         [14, 13, 16, 35],
+#         [14, 17, 38, 42]
+#     ])
+
+# step_size_matrix = step_size_matrix / 10
 
 
 from chosen_schemes.lbt import lbt_forward, lbt_backward
 
-def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
+def jpegenc_xr(X, qstep, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
     '''
     Encodes the image in X to generate a variable length bit stream.
 
@@ -525,47 +550,82 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
     if M % N != 0:
         raise ValueError('M must be an integer multiple of N!')
 
-    # DCT on input image X.
     if log:
         print('Forward {} x {} LBT'.format(N, N))
+
+    # Step 1: Perform LBT on the entire image.
     Y = lbt_forward(X, N, s=1.32)
 
-    Yr = regroup(Y, N)
-    lowpass_index = X.shape[0]//N
+    # Define the size of the macroblock (4x4 blocks of 4x4 pixels).
+    macroblock_size = 4
+    block_size = N
 
-    if log:
-        print('Second {} x {} LBT on low-pass image'.format(N,N))
-    Yr[0:lowpass_index, 0:lowpass_index] = lbt_forward(Yr[0:lowpass_index, 0:lowpass_index], N, s=1.32)
+    Yur = np.zeros((256,256))
 
-    Yur = unregroup(Yr, N)
+    # Process each macroblock.
+    for i in range(0, X.shape[0], macroblock_size * block_size):
+        for j in range(0, X.shape[1], macroblock_size * block_size):
+            # Extract the macroblock.
+            macroblock = Y[i:i + macroblock_size * block_size, j:j + macroblock_size * block_size]
+            
+            # Regroup the DC coefficients of each 4x4 block within the macroblock.
+            macroblock_regrouped = regroup(macroblock, block_size)
+            
+            # Perform LBT on the regrouped DC coefficients.
+            # if log:
+            #     print('Performing LBT on regrouped DC coefficients of a macroblock at position ({}, {})'.format(i, j))
+            
+            lowpass_index = macroblock_regrouped.shape[0] // block_size
+            macroblock_regrouped[0:lowpass_index, 0:lowpass_index] = lbt_forward(macroblock_regrouped[0:lowpass_index, 0:lowpass_index], block_size, s=1.32)
+            
+            # Unregroup the modified macroblock.
+            macroblock_unregrouped = unregroup(macroblock_regrouped, block_size)
+            
+            # Place the processed macroblock back into the image.
+            Yur[i:i + macroblock_size * block_size, j:j + macroblock_size * block_size] = macroblock_unregrouped
 
 
-    # Quantise to integers.
-    if not fdq:
-        if log:
-            print('Quantising to step size of {}'.format(qstep))
-        Yq = quant1(Yur, qstep, qstep).astype('int')
+    #Based on paper, we choose step sizes of 1,1,1.5 for each of the DC, LP and HP coefficients
+
+    block_matrix = np.array([
+        [1, 1.5, 1.5, 1.5],
+        [1.5, 1.5, 1.5, 1.5],
+        [1.5, 1.5, 1.5, 1.5],
+        [1.5, 1.5, 1.5, 1.5],
+    ])
+
+    macroblock_matrix = np.tile(block_matrix, (4,4))
+    tile_matrix = np.tile(macroblock_matrix, (4,4))
+
+    tile_size = macroblock_size*block_size*N
+
+    #Calculate step size map of tiles
+    variance_map = process_tiles(X, tile_size, filter_size=11)
+    top_left_variance = variance_map[0, 0]
+    normalized_variance_map = variance_map / top_left_variance
+
+    # Calculate the matrix of step sizes as the inverse square root of the normalized variance map
+    step_size_map = 1 / np.sqrt(normalized_variance_map)
+    step_size_map_16bit = step_size_map.astype(np.float16)
     
-    if fdq:
-        if log:
-            print('Performing frequency dependent quantisation with overall step size of {}'.format(qstep))
-        coeff_table = step_size_matrix
-        coeffs = np.tile(coeff_table, (64,64))
-        coeffs = coeffs * qstep
+    step_size_matrix = np.zeros((256,256))
+    for i in range(4):
+        for j in range(4):
+            tile_coeffs = step_size_map_16bit[i,j] * tile_matrix
+            step_size_matrix[(i*tile_size):((i+1)*tile_size), (j*tile_size):((j+1)*tile_size)] = tile_coeffs
 
-        Yq = np.zeros((256,256))
+    step_size_matrix = step_size_matrix * qstep
 
-        for i in range(256):
-            for j in range(256):
-                stepsize = coeffs[i,j]
-                Yq[i,j] = quant1(Yur[i,j], stepsize, stepsize)
-                if (Yq[i,j] > 127):
-                    Yq[i,j] = 127
-        Yq = Yq.astype('int')
 
-        # temp = np.ceil((np.abs(Yur) - coeffs)/coeffs)
-        # Yq = temp*(temp > 0)*np.sign(Yur)
-        # Yq = Yq.astype('int')
+    Yq = np.zeros((256,256))
+
+    for i in range(256):
+        for j in range(256):
+            stepsize = step_size_matrix[i,j]
+            Yq[i,j] = quant1(Yur[i,j], stepsize, stepsize)
+            if (Yq[i,j] > 127):
+                Yq[i,j] = 127
+    Yq = Yq.astype('int')   
 
 
     # Generate zig-zag scan of AC coefs.
@@ -609,7 +669,7 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
     if not opthuff:
         if log:
             print('Bits for coded image = {}'.format(sum(vlc[:, 1])))
-        totalbits = vlc[:,1].sum()
+        totalbits = vlc[:,1].sum() + (16*16)
         return vlc, dhufftab, totalbits
 
     # Design custom huffman tables.
@@ -645,12 +705,12 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
         print('Bits for coded image = {}'.format(sum(vlc[:, 1])))
         print('Bits for huffman table = {}'.format(
             (16 + max(dhufftab.huffval.shape))*8))
-    totalbits = vlc[:,1].sum() + ((16 + max(dhufftab.huffval.shape))*8)
+    totalbits = vlc[:,1].sum() + ((16 + max(dhufftab.huffval.shape))*8) + (16*16)
 
-    return vlc, dhufftab, totalbits
+    return vlc, dhufftab, step_size_map_16bit, totalbits
 
 
-def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
+def jpegdec_xr(vlc, qstep, step_size_map, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
     '''
     Decodes a (simplified) JPEG bit stream to an image
 
@@ -764,37 +824,72 @@ def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8
                 yq = regroup(yq, M//N)
             Zq[r:r+M, c:c+M] = yq
 
-    if not fdq:
-        if log:
-            print('Inverse quantising to step size of {}'.format(qstep))
-        Zi = quant2(Zq, qstep, qstep)
+    if log:
+        print('Inverse quantising with step sizes.')
 
-    if fdq:
-        if log:
-            print('Inverse FDQ to step size of {}'.format(qstep))
-        coeff_table = step_size_matrix
-        coeffs = np.tile(coeff_table, (64,64))
-        coeffs = coeffs * qstep
-        
-        Zi = np.zeros((256,256))
+    block_matrix = np.array([
+        [1, 1.5, 1.5, 1.5],
+        [1.5, 1.5, 1.5, 1.5],
+        [1.5, 1.5, 1.5, 1.5],
+        [1.5, 1.5, 1.5, 1.5],
+    ])
 
-        for i in range(256):
-            for j in range(256):
-                stepsize = coeffs[i,j]
-                Zi[i,j] = quant2(Zq[i,j], stepsize, stepsize)
+    macroblock_matrix = np.tile(block_matrix, (4, 4))
+    tile_matrix = np.tile(macroblock_matrix, (4, 4))
+    step_size_matrix = np.zeros((256, 256))
+    tile_size = 64
+
+    for i in range(4):
+        for j in range(4):
+            tile_coeffs = step_size_map[i, j] * tile_matrix
+            step_size_matrix[(i * tile_size):((i + 1) * tile_size), (j * tile_size):((j + 1) * tile_size)] = tile_coeffs
+
+    step_size_matrix = step_size_matrix * qstep
+
+    # Perform inverse quantization
+    Zi = np.zeros((256, 256))
+    for i in range(256):
+        for j in range(256):
+            stepsize = step_size_matrix[i, j]
+            Zi[i, j] = quant2(Zq[i, j], stepsize, stepsize)
 
 
     if log:
-        print('Inverting second {} x {} LBT'.format(N,N))
-    Zir = regroup(Zi, N)
-    lowpass_index = Zi.shape[0]//N
-    Zir[0:lowpass_index, 0:lowpass_index] = lbt_backward(Zir[0:lowpass_index, 0:lowpass_index], N, s=1.32)
+        print('Inverting second {} x {} LBT on each macroblock'.format(N, N))
 
-    Zr = unregroup(Zir, N)
+    # Define the size of the macroblock (4x4 blocks of 4x4 pixels).
+    macroblock_size = 4
+    block_size = N
+
+    Zir = np.zeros((256, 256))
+
+    # Process each macroblock.
+    for i in range(0, Zir.shape[0], macroblock_size * block_size):
+        for j in range(0, Zir.shape[1], macroblock_size * block_size):
+            # Extract the macroblock.
+            macroblock = Zi[i:i + macroblock_size * block_size, j:j + macroblock_size * block_size]
+
+            # Regroup the DC coefficients of each 4x4 block within the macroblock.
+            macroblock_regrouped = regroup(macroblock, block_size)
+
+            # Inverse LBT on the regrouped DC coefficients.
+            # if log:
+            #     print('Inverting LBT on regrouped DC coefficients of a macroblock at position ({}, {})'.format(i, j))
+
+            lowpass_index = macroblock_regrouped.shape[0] // block_size
+            macroblock_regrouped[0:lowpass_index, 0:lowpass_index] = lbt_backward(macroblock_regrouped[0:lowpass_index, 0:lowpass_index], block_size, s=1.32)
+
+            # Unregroup the modified macroblock.
+            macroblock_unregrouped = unregroup(macroblock_regrouped, block_size)
+
+            # Place the processed macroblock back into the image.
+            Zir[i:i + macroblock_size * block_size, j:j + macroblock_size * block_size] = macroblock_unregrouped
 
     if log:
-        print('Inverse {} x {} LBT\n'.format(N, N))
-    Z = lbt_backward(Zr, N, s=1.32)
+        print('Inverse {} x {} LBT on the entire image'.format(N, N))
+
+    # Apply the inverse LBT to the entire image.
+    Z = lbt_backward(Zir, N, s=1.32)
 
     return Z
 
@@ -814,8 +909,7 @@ def vlctest(vlc: np.ndarray) -> int:
     return bitwords['bits'].sum(dtype=np.intp)
 
 
-
-def objective_function_lbt2(step, image, target_bits, fdq=True, N=4, M=16, opthuff=True):
+def objective_function_xr(step, image, target_bits, N=4, M=16, opthuff=True):
     """
     Objective function to minimize the difference between actual bits and target bits.
     
@@ -829,5 +923,5 @@ def objective_function_lbt2(step, image, target_bits, fdq=True, N=4, M=16, opthu
         float: The absolute difference between the actual bit count and target bit count.
     """
     step = max(0, step)  # Ensure the step size is at least 1
-    vlc, hufftab, totalbits = jpegenc_lbt2(image, step, fdq=fdq, N=N, M=M, opthuff=opthuff, log=False)
+    vlc, hufftab, ss_map, totalbits = jpegenc_xr(image, step, N=N, M=M, opthuff=opthuff, log=False)
     return abs(totalbits - target_bits)
