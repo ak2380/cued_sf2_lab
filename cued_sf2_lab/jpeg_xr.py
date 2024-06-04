@@ -588,10 +588,10 @@ def jpegenc_xr(X, qstep, N = 4, M = 16, opthuff = False, dcbits = 8, log = True)
     #Based on paper, we choose step sizes of 1,1,1.5 for each of the DC, LP and HP coefficients
 
     block_matrix = np.array([
-        [1, 1.5, 1.5, 1.5],
-        [1.5, 1.5, 1.5, 1.5],
-        [1.5, 1.5, 1.5, 1.5],
-        [1.5, 1.5, 1.5, 1.5],
+         [16, 11, 10, 16],
+         [12, 12, 14, 19],
+         [14, 13, 16, 35],
+         [14, 17, 38, 42]
     ])
 
     macroblock_matrix = np.tile(block_matrix, (4,4))
@@ -828,10 +828,10 @@ def jpegdec_xr(vlc, qstep, step_size_map, N = 4, M = 16, hufftab = None, dcbits 
         print('Inverse quantising with step sizes.')
 
     block_matrix = np.array([
-        [1, 1.5, 1.5, 1.5],
-        [1.5, 1.5, 1.5, 1.5],
-        [1.5, 1.5, 1.5, 1.5],
-        [1.5, 1.5, 1.5, 1.5],
+         [16, 11, 10, 16],
+         [12, 12, 14, 19],
+         [14, 13, 16, 35],
+         [14, 17, 38, 42]
     ])
 
     macroblock_matrix = np.tile(block_matrix, (4, 4))

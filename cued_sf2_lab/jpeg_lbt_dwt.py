@@ -5,9 +5,11 @@ ks800@cam.ac.uk), who did the bulk of the porting from matlab to Python.
 from typing import Tuple, NamedTuple, Optional
 
 import numpy as np
-from .laplacian_pyramid import quant1, quant2
+from .laplacian_pyramid import quant1, quant2, bpp
 from .dct import dct_ii, colxfm, regroup, unregroup
 from .bitword import bitword
+import matplotlib.pyplot as plt
+from cued_sf2_lab.familiarisation import plot_image
 
 __all__ = [
     "diagscan",
@@ -401,6 +403,103 @@ def huffenc(huffhist: np.ndarray, rsa: np.ndarray, ehuf: np.ndarray
     return np.array(vlc)
 
 
+def extend_matrix(matrix, repeat_factor):
+    """
+    Extend a matrix by repeating its elements.
+
+    Parameters:
+    matrix (list of lists or np.array): The original nxn matrix.
+    repeat_factor (int): The factor by which to repeat each element.
+
+    Returns:
+    np.array: The extended mxm matrix.
+    """
+    # Convert the input matrix to a NumPy array if it isn't one already
+    matrix = np.array(matrix)
+    
+    # Repeat each element repeat_factor times along both axes
+    extended_matrix = np.repeat(np.repeat(matrix, repeat_factor, axis=0), repeat_factor, axis=1)
+    
+    return extended_matrix
+
+
+def dwtquant(Y, dwtstep, rise):
+    """
+    Quantize the DWT coefficients using the specified step sizes.
+
+    Parameters:
+        Y: the output of `dwt(X, n)`
+        dwtstep: an array of shape `(3, n+1)` containing the quantization steps
+        rise: the first step rise value (similar to rise in quant1)
+
+    Returns:
+        Yq: the quantized DWT coefficients
+        dwtent: an array of shape `(3, n+1)` containing the entropies
+    """
+    N = dwtstep.shape[1] - 1
+    Yq = Y.copy()
+    dwtent = np.zeros((3, N + 1))
+
+    size = Y.shape[0]
+    for i in range(N):
+        m = size // (2 ** (i + 1))
+        
+        for k in range(3):
+            if k == 0:  # top right
+                sub_image = Y[:m, m:2*m]
+                Yq[:m, m:2*m] = quant1(sub_image, dwtstep[k, i], rise*dwtstep[k, i]).astype(int)
+                dwtent[k, i] = bpp(Yq[:m, m:2*m])
+            elif k == 1:  # bottom left
+                sub_image = Y[m:2*m, :m]
+                Yq[m:2*m, :m] = quant1(sub_image, dwtstep[k, i], rise*dwtstep[k, i]).astype(int)
+                dwtent[k, i] = bpp(Yq[m:2*m, :m])
+            elif k == 2:  # bottom right
+                sub_image = Y[m:2*m, m:2*m]
+                Yq[m:2*m, m:2*m] = quant1(sub_image, dwtstep[k, i], rise*dwtstep[k, i]).astype(int)
+                dwtent[k, i] = bpp(Yq[m:2*m, m:2*m])
+
+    m = size // (2 ** N)
+    # Final low-pass image quantization
+    final_ll = Y[:m, :m]
+    Yq[:m, :m] = quant1(final_ll, dwtstep[0, N], rise*dwtstep[0, N])
+    dwtent[0, N] = bpp(Yq[:m, :m])
+
+    return Yq, dwtent
+
+def dwtquant_reconstruct(Yq, dwtstep, rise):
+    """
+    Reconstruct the DWT coefficients from the quantized values.
+
+    Parameters:
+        Yq: the quantized DWT coefficients
+        dwtstep: an array of shape (3, n+1) containing the quantization steps
+
+    Returns:
+        Y: the reconstructed DWT coefficients
+    """
+    N = dwtstep.shape[1] - 1
+    Y = Yq.copy()
+
+    size = Y.shape[0]
+    for i in range(N):
+        m = size // (2 ** (i + 1))
+
+        for k in range(3):
+            if k == 0:  # top right
+                Y[:m, m:2*m] = quant2(Yq[:m, m:2*m], dwtstep[k, i], rise*dwtstep[k, i])
+            elif k == 1:  # bottom left
+                Y[m:2*m, :m] = quant2(Yq[m:2*m, :m], dwtstep[k, i], rise*dwtstep[k, i])
+            elif k == 2:  # bottom right
+                Y[m:2*m, m:2*m] = quant2(Yq[m:2*m, m:2*m], dwtstep[k, i], rise*dwtstep[k, i])
+
+    m = size // (2 ** N)
+    Y[:m, :m] = quant2(Yq[:m, :m], dwtstep[0, N], rise*dwtstep[0, N])
+
+    return Y
+
+
+
+
 def dwtgroup(X: np.ndarray, n: int) -> np.ndarray:
     '''
     Regroups the rows and columns of ``X``, such that an
@@ -487,19 +586,6 @@ def dwtgroup(X: np.ndarray, n: int) -> np.ndarray:
     return Y
 
 
-
-
-'''5x5 convolutional filter of the DCT table'''
-# step_size_matrix = np.array([
-#         [20, 31, 46, 56],
-#         [24, 35, 55, 68],
-#         [36, 49, 79, 91],
-#         [54, 68, 104, 114]
-#     ])
-
-# step_size_matrix = step_size_matrix / 10
-
-'''top left of the DCT table'''
 step_size_matrix = np.array([
         [16, 11, 10, 16],
         [12, 12, 14, 19],
@@ -507,46 +593,16 @@ step_size_matrix = np.array([
         [14, 17, 22, 29]
     ])
 
-'''Simulated annealing article: https://ar5iv.labs.arxiv.org/html/2008.05672v1'''
-# step_size_matrix = np.array([
-#         [28, 23, 25, 25],
-#         [27, 25, 23, 30],
-#         [27, 25, 27, 33],
-#         [26, 27, 31, 34]
-#     ])
-
-'''https://ieeexplore.ieee.org/abstract/document/6738345'''
-# step_size_matrix = np.array([
-#         [40, 11, 19, 49],
-#         [11, 25, 29, 73],
-#         [19, 29, 51, 128],
-#         [49, 27, 128, 255]
-#     ])
-
-'''Guided fireworks algo: https://link.springer.com/chapter/10.1007/978-3-319-59108-7_23/tables/2'''
-# step_size_matrix = np.array([
-#         [40, 28, 25, 40],
-#         [30, 30, 35, 48],
-#         [35, 33, 40, 60],
-#         [35, 43, 55, 73]
-#     ])
-
-# '''New proposed scheme: https://arxiv.org/pdf/1802.00992'''
-# step_size_matrix = np.array([
-#         [8, 6, 5, 8],
-#         [6, 6, 7, 10],
-#         [7, 7, 8, 12],
-#         [7, 9, 11, 15]
-#     ])
+step_size_matrix = step_size_matrix / 10
 
 
 
-step_size_matrix = step_size_matrix/4
 
 
 from chosen_schemes.lbt import lbt_forward, lbt_backward
+from chosen_schemes.dwt import nlevdwt, nlevidwt, compute_ss_ratios
 
-def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
+def jpegenc_lbt_dwt(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
     '''
     Encodes the image in X to generate a variable length bit stream.
 
@@ -580,34 +636,43 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
     Yr = regroup(Y, N)
     lowpass_index = X.shape[0]//N
 
-    if log:
-        print('Second {} x {} LBT on low-pass image'.format(N,N))
-    Yr[0:lowpass_index, 0:lowpass_index] = lbt_forward(Yr[0:lowpass_index, 0:lowpass_index], N, s=1.32)
 
-    Yur = unregroup(Yr, N)
+    if log:
+        print('Second {}-level DWT on low-pass image'.format(2))
+    Yr[0:lowpass_index, 0:lowpass_index] = nlevdwt(Yr[0:lowpass_index, 0:lowpass_index], 2)
+
+    Yr[0:lowpass_index, 0:lowpass_index] = dwtgroup(Yr[0:lowpass_index, 0:lowpass_index], 2)
 
     # Quantise to integers.
     if not fdq:
         if log:
-            print('Quantising to step size of {}'.format(qstep))
-        Yq = quant1(Yur, qstep, qstep).astype('int')
-    
+            print('Quantizing to step size of {}'.format(qstep))
+        Yq = Yr.copy()
+        for i in range(256):
+            for j in range(256):
+                Yq[i, j] = quant1(Yr[i, j], qstep, qstep)
+                if Yq[i, j] > 127:
+                    Yq[i, j] = 127
+        Yq = Yq.astype('int')
+
     if fdq:
         if log:
-            print('Performing frequency dependent quantisation with overall step size of {}'.format(qstep))
+            print('Performing frequency dependent quantization with overall step size of {}'.format(qstep))
         coeff_table = step_size_matrix
-        coeffs = np.tile(coeff_table, (64,64))
+        coeffs = extend_matrix(coeff_table, 64)
         coeffs = coeffs * qstep
 
-        Yq = np.zeros((256,256))
+        Yq = Yr.copy()
 
         for i in range(256):
             for j in range(256):
-                stepsize = coeffs[i,j]
-                Yq[i,j] = quant1(Yur[i,j], stepsize, stepsize)
-                if (Yq[i,j] > 127):
-                    Yq[i,j] = 127
+                stepsize = coeffs[i, j]
+                Yq[i, j] = quant1(Yr[i, j], stepsize, stepsize)
+                if Yq[i, j] > 127:
+                    Yq[i, j] = 127
         Yq = Yq.astype('int')
+
+    Yq = unregroup(Yq, N)
 
         # temp = np.ceil((np.abs(Yur) - coeffs)/coeffs)
         # Yq = temp*(temp > 0)*np.sign(Yur)
@@ -696,7 +761,7 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
     return vlc, dhufftab, totalbits
 
 
-def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
+def jpegdec_lbt_dwt(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
     '''
     Decodes a (simplified) JPEG bit stream to an image
 
@@ -810,37 +875,45 @@ def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8
                 yq = regroup(yq, M//N)
             Zq[r:r+M, c:c+M] = yq
 
-    if not fdq:
-        if log:
-            print('Inverse quantising to step size of {}'.format(qstep))
-        Zi = quant2(Zq, qstep, qstep)
+    if log:
+        print('Regrouping quantized image')
+    Zr = regroup(Zq, N)
 
     if fdq:
         if log:
-            print('Inverse FDQ to step size of {}'.format(qstep))
+            print('De-quantizing frequency dependent with overall step size of {}'.format(qstep))
         coeff_table = step_size_matrix
-        coeffs = np.tile(coeff_table, (64,64))
+        coeffs = extend_matrix(coeff_table, 64)
         coeffs = coeffs * qstep
-        
-        Zi = np.zeros((256,256))
+
+        Ydq = Zr.copy()
 
         for i in range(256):
             for j in range(256):
-                stepsize = coeffs[i,j]
-                Zi[i,j] = quant2(Zq[i,j], stepsize, stepsize)
+                stepsize = coeffs[i, j]
+                Ydq[i, j] = quant2(Zr[i, j], stepsize, stepsize)
+    if not fdq:
+        if log:
+            print('De-quantizing to step size of {}'.format(qstep))
+        Ydq = Zr.copy()
+        for i in range(256):
+            for j in range(256):
+                Ydq[i, j] = quant2(Zr[i, j], qstep, qstep)
 
+    lowpass_index = Ydq.shape[0]//N
+
+    Ydq[0:lowpass_index, 0:lowpass_index] = dwtgroup(Ydq[0:lowpass_index, 0:lowpass_index], -2)
 
     if log:
-        print('Inverting second {} x {} LBT'.format(N,N))
-    Zir = regroup(Zi, N)
-    lowpass_index = Zi.shape[0]//N
-    Zir[0:lowpass_index, 0:lowpass_index] = lbt_backward(Zir[0:lowpass_index, 0:lowpass_index], N, s=1.32)
+        print('Inverting second {}-level DWT on low-pass image'.format(2))
+    Ydq[0:lowpass_index, 0:lowpass_index] = nlevidwt(Ydq[0:lowpass_index, 0:lowpass_index], 2)
 
-    Zr = unregroup(Zir, N)
+    Ydq = unregroup(Ydq, N)
 
     if log:
-        print('Inverse {} x {} LBT\n'.format(N, N))
-    Z = lbt_backward(Zr, N, s=1.32)
+        print('Inverting {} x {} LBT'.format(N, N))
+    Z = lbt_backward(Ydq, N, s=1.32)
+
 
     return Z
 
@@ -875,5 +948,5 @@ def objective_function_lbt2(step, image, target_bits, fdq=True, N=4, M=16, opthu
         float: The absolute difference between the actual bit count and target bit count.
     """
     step = max(0, step)  # Ensure the step size is at least 1
-    vlc, hufftab, totalbits = jpegenc_lbt2(image, step, fdq=fdq, N=N, M=M, opthuff=opthuff, log=False)
+    vlc, hufftab, totalbits = jpegenc_lbt_dwt(image, step, fdq=fdq, N=N, M=M, opthuff=opthuff, log=False)
     return abs(totalbits - target_bits)

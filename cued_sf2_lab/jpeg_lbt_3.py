@@ -487,9 +487,16 @@ def dwtgroup(X: np.ndarray, n: int) -> np.ndarray:
     return Y
 
 
+step_size_matrix = np.array([
+        [16, 11, 10, 16],
+        [12, 12, 14, 19],
+        [14, 13, 16, 24],
+        [14, 17, 22, 29]
+    ])
+
+step_size_matrix = step_size_matrix / 10
 
 
-'''5x5 convolutional filter of the DCT table'''
 # step_size_matrix = np.array([
 #         [20, 31, 46, 56],
 #         [24, 35, 55, 68],
@@ -499,54 +506,9 @@ def dwtgroup(X: np.ndarray, n: int) -> np.ndarray:
 
 # step_size_matrix = step_size_matrix / 10
 
-'''top left of the DCT table'''
-step_size_matrix = np.array([
-        [16, 11, 10, 16],
-        [12, 12, 14, 19],
-        [14, 13, 16, 24],
-        [14, 17, 22, 29]
-    ])
-
-'''Simulated annealing article: https://ar5iv.labs.arxiv.org/html/2008.05672v1'''
-# step_size_matrix = np.array([
-#         [28, 23, 25, 25],
-#         [27, 25, 23, 30],
-#         [27, 25, 27, 33],
-#         [26, 27, 31, 34]
-#     ])
-
-'''https://ieeexplore.ieee.org/abstract/document/6738345'''
-# step_size_matrix = np.array([
-#         [40, 11, 19, 49],
-#         [11, 25, 29, 73],
-#         [19, 29, 51, 128],
-#         [49, 27, 128, 255]
-#     ])
-
-'''Guided fireworks algo: https://link.springer.com/chapter/10.1007/978-3-319-59108-7_23/tables/2'''
-# step_size_matrix = np.array([
-#         [40, 28, 25, 40],
-#         [30, 30, 35, 48],
-#         [35, 33, 40, 60],
-#         [35, 43, 55, 73]
-#     ])
-
-# '''New proposed scheme: https://arxiv.org/pdf/1802.00992'''
-# step_size_matrix = np.array([
-#         [8, 6, 5, 8],
-#         [6, 6, 7, 10],
-#         [7, 7, 8, 12],
-#         [7, 9, 11, 15]
-#     ])
-
-
-
-step_size_matrix = step_size_matrix/4
-
-
 from chosen_schemes.lbt import lbt_forward, lbt_backward
 
-def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
+def jpegenc_lbt3(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
     '''
     Encodes the image in X to generate a variable length bit stream.
 
@@ -584,7 +546,18 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
         print('Second {} x {} LBT on low-pass image'.format(N,N))
     Yr[0:lowpass_index, 0:lowpass_index] = lbt_forward(Yr[0:lowpass_index, 0:lowpass_index], N, s=1.32)
 
-    Yur = unregroup(Yr, N)
+    Yr[0:lowpass_index, 0:lowpass_index] = regroup(Yr[0:lowpass_index, 0:lowpass_index], N)
+    lowpass_index_2 = lowpass_index // N
+
+    if log:
+        print('Third {} x {} LBT on low-pass of low-pass image'.format(N,N))
+    Yr[0:lowpass_index_2, 0:lowpass_index_2] = lbt_forward(Yr[0:lowpass_index_2, 0:lowpass_index_2], N, s=1.32)
+
+    Yur = Yr.copy()
+ 
+    Yur[0:lowpass_index, 0:lowpass_index] = unregroup(Yr[0:lowpass_index, 0:lowpass_index], N)
+    Yur = unregroup(Yur, N)
+
 
     # Quantise to integers.
     if not fdq:
@@ -696,7 +669,7 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
     return vlc, dhufftab, totalbits
 
 
-def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
+def jpegdec_lbt3(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
     '''
     Decodes a (simplified) JPEG bit stream to an image
 
@@ -831,18 +804,33 @@ def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8
 
 
     if log:
-        print('Inverting second {} x {} LBT'.format(N,N))
+        print('Inverting third {} x {} LBT on low-pass of low-pass image'.format(N, N))
     Zir = regroup(Zi, N)
-    lowpass_index = Zi.shape[0]//N
+    lowpass_index = Zi.shape[0] // N
+    lowpass_index_2 = lowpass_index // N
+
+    Zir[0:lowpass_index, 0:lowpass_index] = regroup(Zir[0:lowpass_index, 0:lowpass_index], N)
+
+    Zir[0:lowpass_index_2, 0:lowpass_index_2] = lbt_backward(Zir[0:lowpass_index_2, 0:lowpass_index_2], N, s=1.32)
+
+    if log:
+        print('Unregrouping after third LBT')
+    Zir[0:lowpass_index, 0:lowpass_index] = unregroup(Zir[0:lowpass_index, 0:lowpass_index], N)
+
+    if log:
+        print('Inverting second {} x {} LBT on low-pass image'.format(N, N))
     Zir[0:lowpass_index, 0:lowpass_index] = lbt_backward(Zir[0:lowpass_index, 0:lowpass_index], N, s=1.32)
 
+    if log:
+        print('Unregrouping after second LBT')
     Zr = unregroup(Zir, N)
 
     if log:
-        print('Inverse {} x {} LBT\n'.format(N, N))
+        print('Inverting first {} x {} LBT'.format(N, N))
     Z = lbt_backward(Zr, N, s=1.32)
 
     return Z
+
 
 
 
@@ -861,7 +849,7 @@ def vlctest(vlc: np.ndarray) -> int:
 
 
 
-def objective_function_lbt2(step, image, target_bits, fdq=True, N=4, M=16, opthuff=True):
+def objective_function_lbt3(step, image, target_bits, fdq=True, N=4, M=16, opthuff=True):
     """
     Objective function to minimize the difference between actual bits and target bits.
     
@@ -875,5 +863,5 @@ def objective_function_lbt2(step, image, target_bits, fdq=True, N=4, M=16, opthu
         float: The absolute difference between the actual bit count and target bit count.
     """
     step = max(0, step)  # Ensure the step size is at least 1
-    vlc, hufftab, totalbits = jpegenc_lbt2(image, step, fdq=fdq, N=N, M=M, opthuff=opthuff, log=False)
+    vlc, hufftab, totalbits = jpegenc_lbt3(image, step, fdq=fdq, N=N, M=M, opthuff=opthuff, log=False)
     return abs(totalbits - target_bits)

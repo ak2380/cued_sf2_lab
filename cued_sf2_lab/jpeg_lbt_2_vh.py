@@ -9,6 +9,8 @@ from .laplacian_pyramid import quant1, quant2
 from .dct import dct_ii, colxfm, regroup, unregroup
 from .bitword import bitword
 
+from scipy.ndimage import gaussian_filter
+
 __all__ = [
     "diagscan",
     "runampl",
@@ -486,67 +488,43 @@ def dwtgroup(X: np.ndarray, n: int) -> np.ndarray:
 
     return Y
 
+def calculate_local_variance(image, filter_size=25):
+    # Apply Gaussian filter to get the local mean
+    local_mean = gaussian_filter(image, filter_size)
+    # Apply Gaussian filter to get the local squared mean
+    local_squared_mean = gaussian_filter(image ** 2, filter_size)
+    # Calculate local variance
+    local_variance = local_squared_mean - local_mean ** 2
+    return local_mean, local_variance
+
+def process_tiles(image, tile_size=64, filter_size=25):
+    height, width = image.shape
+    variance_map = np.zeros((height // tile_size, width // tile_size))
+
+    for i in range(0, height, tile_size):
+        for j in range(0, width, tile_size):
+            tile = image[i:i + tile_size, j:j + tile_size]
+            _, local_variance = calculate_local_variance(tile, filter_size)
+
+            mean_variance = np.mean(local_variance)
+            variance_map[i // tile_size, j // tile_size] = mean_variance
+
+    return variance_map
 
 
-
-'''5x5 convolutional filter of the DCT table'''
 # step_size_matrix = np.array([
-#         [20, 31, 46, 56],
-#         [24, 35, 55, 68],
-#         [36, 49, 79, 91],
-#         [54, 68, 104, 114]
+#         [16, 11, 10, 16],
+#         [12, 12, 14, 19],
+#         [14, 13, 16, 35],
+#         [14, 17, 38, 42]
 #     ])
 
 # step_size_matrix = step_size_matrix / 10
 
-'''top left of the DCT table'''
-step_size_matrix = np.array([
-        [16, 11, 10, 16],
-        [12, 12, 14, 19],
-        [14, 13, 16, 24],
-        [14, 17, 22, 29]
-    ])
-
-'''Simulated annealing article: https://ar5iv.labs.arxiv.org/html/2008.05672v1'''
-# step_size_matrix = np.array([
-#         [28, 23, 25, 25],
-#         [27, 25, 23, 30],
-#         [27, 25, 27, 33],
-#         [26, 27, 31, 34]
-#     ])
-
-'''https://ieeexplore.ieee.org/abstract/document/6738345'''
-# step_size_matrix = np.array([
-#         [40, 11, 19, 49],
-#         [11, 25, 29, 73],
-#         [19, 29, 51, 128],
-#         [49, 27, 128, 255]
-#     ])
-
-'''Guided fireworks algo: https://link.springer.com/chapter/10.1007/978-3-319-59108-7_23/tables/2'''
-# step_size_matrix = np.array([
-#         [40, 28, 25, 40],
-#         [30, 30, 35, 48],
-#         [35, 33, 40, 60],
-#         [35, 43, 55, 73]
-#     ])
-
-# '''New proposed scheme: https://arxiv.org/pdf/1802.00992'''
-# step_size_matrix = np.array([
-#         [8, 6, 5, 8],
-#         [6, 6, 7, 10],
-#         [7, 7, 8, 12],
-#         [7, 9, 11, 15]
-#     ])
-
-
-
-step_size_matrix = step_size_matrix/4
-
 
 from chosen_schemes.lbt import lbt_forward, lbt_backward
 
-def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
+def jpegenc_lbt2(X, qstep, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
     '''
     Encodes the image in X to generate a variable length bit stream.
 
@@ -586,33 +564,48 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
 
     Yur = unregroup(Yr, N)
 
-    # Quantise to integers.
-    if not fdq:
-        if log:
-            print('Quantising to step size of {}'.format(qstep))
-        Yq = quant1(Yur, qstep, qstep).astype('int')
+
+    block_matrix = np.array([
+         [16, 11, 10, 16],
+         [12, 12, 14, 19],
+         [14, 13, 16, 35],
+         [14, 17, 38, 42]
+    ])
+
+    macroblock_matrix = np.tile(block_matrix, (4,4))
+    tile_matrix = np.tile(macroblock_matrix, (4,4))
+
+    tile_size = 64
+
+    #Calculate step size map of tiles
+    variance_map = process_tiles(X, tile_size, filter_size=48)
+    top_left_variance = variance_map[0, 0]
+    normalized_variance_map = variance_map / top_left_variance
+
+    # Calculate the matrix of step sizes as the inverse square root of the normalized variance map
+    step_size_map = 1 / np.power(normalized_variance_map, 0.16)
+    step_size_map_16bit = step_size_map.astype(np.float16)
+
+    print(step_size_map_16bit)
     
-    if fdq:
-        if log:
-            print('Performing frequency dependent quantisation with overall step size of {}'.format(qstep))
-        coeff_table = step_size_matrix
-        coeffs = np.tile(coeff_table, (64,64))
-        coeffs = coeffs * qstep
+    step_size_matrix = np.zeros((256,256))
+    for i in range(4):
+        for j in range(4):
+            tile_coeffs = step_size_map_16bit[i,j] * tile_matrix
+            step_size_matrix[(i*tile_size):((i+1)*tile_size), (j*tile_size):((j+1)*tile_size)] = tile_coeffs
 
-        Yq = np.zeros((256,256))
+    step_size_matrix = step_size_matrix * qstep
 
-        for i in range(256):
-            for j in range(256):
-                stepsize = coeffs[i,j]
-                Yq[i,j] = quant1(Yur[i,j], stepsize, stepsize)
-                if (Yq[i,j] > 127):
-                    Yq[i,j] = 127
-        Yq = Yq.astype('int')
 
-        # temp = np.ceil((np.abs(Yur) - coeffs)/coeffs)
-        # Yq = temp*(temp > 0)*np.sign(Yur)
-        # Yq = Yq.astype('int')
+    Yq = np.zeros((256,256))
 
+    for i in range(256):
+        for j in range(256):
+            stepsize = step_size_matrix[i,j]
+            Yq[i,j] = quant1(Yur[i,j], stepsize, stepsize)
+            if (Yq[i,j] > 127):
+                Yq[i,j] = 127
+    Yq = Yq.astype('int')   
 
     # Generate zig-zag scan of AC coefs.
     scan = diagscan(M)
@@ -693,10 +686,10 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
             (16 + max(dhufftab.huffval.shape))*8))
     totalbits = vlc[:,1].sum() + ((16 + max(dhufftab.huffval.shape))*8)
 
-    return vlc, dhufftab, totalbits
+    return vlc, dhufftab, step_size_map_16bit, totalbits
 
 
-def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
+def jpegdec_lbt2(vlc, qstep, step_size_map, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
     '''
     Decodes a (simplified) JPEG bit stream to an image
 
@@ -810,25 +803,34 @@ def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8
                 yq = regroup(yq, M//N)
             Zq[r:r+M, c:c+M] = yq
 
-    if not fdq:
-        if log:
-            print('Inverse quantising to step size of {}'.format(qstep))
-        Zi = quant2(Zq, qstep, qstep)
+    if log:
+        print('Inverse quantising with step sizes.')
 
-    if fdq:
-        if log:
-            print('Inverse FDQ to step size of {}'.format(qstep))
-        coeff_table = step_size_matrix
-        coeffs = np.tile(coeff_table, (64,64))
-        coeffs = coeffs * qstep
-        
-        Zi = np.zeros((256,256))
+    block_matrix = np.array([
+         [16, 11, 10, 16],
+         [12, 12, 14, 19],
+         [14, 13, 16, 35],
+         [14, 17, 38, 42]
+    ])
 
-        for i in range(256):
-            for j in range(256):
-                stepsize = coeffs[i,j]
-                Zi[i,j] = quant2(Zq[i,j], stepsize, stepsize)
+    macroblock_matrix = np.tile(block_matrix, (4, 4))
+    tile_matrix = np.tile(macroblock_matrix, (4,4))
+    step_size_matrix = np.zeros((256, 256))
+    tile_size = 64
 
+    for i in range(4):
+        for j in range(4):
+            tile_coeffs = step_size_map[i, j] * tile_matrix
+            step_size_matrix[(i * tile_size):((i + 1) * tile_size), (j * tile_size):((j + 1) * tile_size)] = tile_coeffs
+
+    step_size_matrix = step_size_matrix * qstep
+
+    # Perform inverse quantization
+    Zi = np.zeros((256, 256))
+    for i in range(256):
+        for j in range(256):
+            stepsize = step_size_matrix[i, j]
+            Zi[i, j] = quant2(Zq[i, j], stepsize, stepsize)
 
     if log:
         print('Inverting second {} x {} LBT'.format(N,N))

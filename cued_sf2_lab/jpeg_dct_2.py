@@ -501,10 +501,14 @@ def dwtgroup(X: np.ndarray, n: int) -> np.ndarray:
 
 '''top left of the DCT table'''
 step_size_matrix = np.array([
-        [16, 11, 10, 16],
-        [12, 12, 14, 19],
-        [14, 13, 16, 24],
-        [14, 17, 22, 29]
+        [16, 11, 10, 16, 24, 40, 51, 61],
+        [12, 12, 14, 19, 26, 58, 60, 55],
+        [14, 13, 16, 24, 40, 57, 69, 56],
+        [14, 17, 22, 29, 51, 87, 80, 62],
+        [18, 22, 37, 56, 68, 109, 103, 77],
+        [24, 35, 55, 64, 81, 104, 113, 92],
+        [49, 64, 78, 87, 103, 121, 120, 101],
+        [72, 92, 95, 98, 112, 100, 103, 99]
     ])
 
 '''Simulated annealing article: https://ar5iv.labs.arxiv.org/html/2008.05672v1'''
@@ -541,12 +545,13 @@ step_size_matrix = np.array([
 
 
 
-step_size_matrix = step_size_matrix/4
+step_size_matrix = step_size_matrix/10
 
 
-from chosen_schemes.lbt import lbt_forward, lbt_backward
+from chosen_schemes.dct import dct, idct
+from chosen_schemes.lbt import lbt_backward, lbt_forward
 
-def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8, log = True):
+def jpegenc_dct2(X, qstep, fdq=True, N = 8, M = 8, opthuff = False, dcbits = 8, log = True):
     '''
     Encodes the image in X to generate a variable length bit stream.
 
@@ -575,14 +580,14 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
     # DCT on input image X.
     if log:
         print('Forward {} x {} LBT'.format(N, N))
-    Y = lbt_forward(X, N, s=1.32)
+    Y = dct(X, N)
 
     Yr = regroup(Y, N)
     lowpass_index = X.shape[0]//N
 
     if log:
         print('Second {} x {} LBT on low-pass image'.format(N,N))
-    Yr[0:lowpass_index, 0:lowpass_index] = lbt_forward(Yr[0:lowpass_index, 0:lowpass_index], N, s=1.32)
+    Yr[0:lowpass_index, 0:lowpass_index] = lbt_forward(Yr[0:lowpass_index, 0:lowpass_index], N//2)
 
     Yur = unregroup(Yr, N)
 
@@ -596,7 +601,7 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
         if log:
             print('Performing frequency dependent quantisation with overall step size of {}'.format(qstep))
         coeff_table = step_size_matrix
-        coeffs = np.tile(coeff_table, (64,64))
+        coeffs = np.tile(coeff_table, (32, 32))
         coeffs = coeffs * qstep
 
         Yq = np.zeros((256,256))
@@ -696,7 +701,7 @@ def jpegenc_lbt2(X, qstep, fdq=True, N = 4, M = 16, opthuff = False, dcbits = 8,
     return vlc, dhufftab, totalbits
 
 
-def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
+def jpegdec_dct2(vlc, qstep, fdq=True, N = 8, M = 8, hufftab = None, dcbits = 8, W = 256, H = 256, log = True):
     '''
     Decodes a (simplified) JPEG bit stream to an image
 
@@ -819,7 +824,7 @@ def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8
         if log:
             print('Inverse FDQ to step size of {}'.format(qstep))
         coeff_table = step_size_matrix
-        coeffs = np.tile(coeff_table, (64,64))
+        coeffs = np.tile(coeff_table, (32,32))
         coeffs = coeffs * qstep
         
         Zi = np.zeros((256,256))
@@ -834,13 +839,13 @@ def jpegdec_lbt2(vlc, qstep, fdq=True, N = 4, M = 16, hufftab = None, dcbits = 8
         print('Inverting second {} x {} LBT'.format(N,N))
     Zir = regroup(Zi, N)
     lowpass_index = Zi.shape[0]//N
-    Zir[0:lowpass_index, 0:lowpass_index] = lbt_backward(Zir[0:lowpass_index, 0:lowpass_index], N, s=1.32)
+    Zir[0:lowpass_index, 0:lowpass_index] = lbt_backward(Zir[0:lowpass_index, 0:lowpass_index], N//2)
 
     Zr = unregroup(Zir, N)
 
     if log:
         print('Inverse {} x {} LBT\n'.format(N, N))
-    Z = lbt_backward(Zr, N, s=1.32)
+    Z = idct(Zr, N)
 
     return Z
 
@@ -861,7 +866,7 @@ def vlctest(vlc: np.ndarray) -> int:
 
 
 
-def objective_function_lbt2(step, image, target_bits, fdq=True, N=4, M=16, opthuff=True):
+def objective_function_dct2(step, image, target_bits, fdq=True, N=8, M=8, opthuff=True):
     """
     Objective function to minimize the difference between actual bits and target bits.
     
@@ -875,5 +880,5 @@ def objective_function_lbt2(step, image, target_bits, fdq=True, N=4, M=16, opthu
         float: The absolute difference between the actual bit count and target bit count.
     """
     step = max(0, step)  # Ensure the step size is at least 1
-    vlc, hufftab, totalbits = jpegenc_lbt2(image, step, fdq=fdq, N=N, M=M, opthuff=opthuff, log=False)
+    vlc, hufftab, totalbits = jpegenc_dct2(image, step, fdq=fdq, N=N, M=M, opthuff=opthuff, log=False)
     return abs(totalbits - target_bits)

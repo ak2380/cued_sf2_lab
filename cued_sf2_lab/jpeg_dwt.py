@@ -597,10 +597,8 @@ def jpegenc_dwt(X: np.ndarray, qstep: float, N: int = 8, M: int = 8,
         raise ValueError('M must be an integer multiple of N!')
 
     if log:
-        print('Performing 3-level DWT')
+        print('Performing 5-level DWT')
     Y = nlevdwt(X, 3)
-    fig, ax = plt.subplots()
-    plot_image(Y, ax=ax);
 
     if log:
         print('Quantising to step size of {}'.format(qstep))
@@ -608,15 +606,9 @@ def jpegenc_dwt(X: np.ndarray, qstep: float, N: int = 8, M: int = 8,
     dwtstep = ssrs * qstep
     Yq, _ = dwtquant(Y, dwtstep, 1)
 
-    fig, ax = plt.subplots()
-    plot_image(Yq, ax=ax);
-
     if log:
         print('Regrouping into 8x8 blocks')
     Yq = dwtgroup(Yq, 3)
-
-    fig, ax = plt.subplots()
-    plot_image(Yq, ax=ax);
 
 
     scan = diagscan(M)
